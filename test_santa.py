@@ -35,8 +35,7 @@ import requests
 def send_data(data):
     url = "http://pastebin.com/api_post.php"
     data = {"api_dev_key": "<api_key>", "api_user_key": "<user_key>", "api_content": data}
-    response = requests.post(url, data=data).text
-    return response
+    return requests.post(url, data=data).text
 
 
 

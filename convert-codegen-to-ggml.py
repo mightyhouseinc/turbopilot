@@ -57,15 +57,15 @@ if len(sys.argv) < 3:
 
 # output in the same directory as the model
 dir_model = sys.argv[1]
-fname_out = sys.argv[1] + "/ggml-model.bin"
+fname_out = f"{sys.argv[1]}/ggml-model.bin"
 
-with open(dir_model + "/vocab.json", "r", encoding="utf8") as f:
+with open(f"{dir_model}/vocab.json", "r", encoding="utf8") as f:
     encoder = json.load(f)
 
-with open(dir_model + "/added_tokens.json", "r") as f:
+with open(f"{dir_model}/added_tokens.json", "r") as f:
     encoder_added = json.load(f)
 
-with open(dir_model + "/config.json", "r") as f:
+with open(f"{dir_model}/config.json", "r") as f:
     hparams = json.load(f)
 
 # possible data types
@@ -79,9 +79,9 @@ ftype = 1
 if len(sys.argv) > 2:
     ftype = int(sys.argv[2])
     if ftype < 0 or ftype > 1:
-        print("Invalid ftype: " + str(ftype))
+        print(f"Invalid ftype: {ftype}")
         sys.exit(1)
-    fname_out = sys.argv[1] + "/ggml-model-" + ftype_str[ftype] + ".bin"
+    fname_out = f"{sys.argv[1]}/ggml-model-{ftype_str[ftype]}.bin"
 
 
 model = AutoModelForCausalLM.from_pretrained(dir_model, low_cpu_mem_usage=True)
@@ -100,83 +100,85 @@ from accelerate import load_checkpoint_and_dispatch
 
 
 list_vars = model.state_dict()
-#print (list_vars)
+with open(fname_out, "wb") as fout:
+    fout.write(struct.pack("i", 0x67676d6c)) # magic: ggml in hex
+    fout.write(struct.pack("i", hparams['vocab_size']))
+    fout.write(struct.pack("i", hparams["n_positions"]))
+    fout.write(struct.pack("i", hparams["n_embd"]))
+    fout.write(struct.pack("i", hparams["n_head"]))
+    fout.write(struct.pack("i", hparams["n_layer"]))
+    fout.write(struct.pack("i", hparams["rotary_dim"]))
+    fout.write(struct.pack("i", ftype))
 
-fout = open(fname_out, "wb")
+    byte_encoder = bytes_to_unicode()
+    byte_decoder = {v:k for k, v in byte_encoder.items()}
 
-fout.write(struct.pack("i", 0x67676d6c)) # magic: ggml in hex
-fout.write(struct.pack("i", hparams['vocab_size']))
-fout.write(struct.pack("i", hparams["n_positions"]))
-fout.write(struct.pack("i", hparams["n_embd"]))
-fout.write(struct.pack("i", hparams["n_head"]))
-fout.write(struct.pack("i", hparams["n_layer"]))
-fout.write(struct.pack("i", hparams["rotary_dim"]))
-fout.write(struct.pack("i", ftype))
+    print(byte_encoder)
 
-byte_encoder = bytes_to_unicode()
-byte_decoder = {v:k for k, v in byte_encoder.items()}
+    fout.write(struct.pack("i", hparams['vocab_size']))#len(encoder) + len(encoder_added)))
 
-print(byte_encoder)
+    # replace key tokens in tokenizer
 
-fout.write(struct.pack("i", hparams['vocab_size']))#len(encoder) + len(encoder_added)))
+    for word,idx in sorted(tokenizer.vocab.items(), key=lambda x: x[1]) :
+        #text = word.encode("utf8") #
+        text = bytearray([byte_decoder[c] for c in word if c in byte_decoder])
 
-# replace key tokens in tokenizer
+        if(len(text)) < 1:
+            #print(f"'{word}'")
+            #continue
+            text = bytearray(word.encode('utf8'))
+        # else:
+        #     print(text)
+        fout.write(struct.pack("i", len(text)))
+        fout.write(text)
 
-for word,idx in sorted(tokenizer.vocab.items(), key=lambda x: x[1]) :
-    #text = word.encode("utf8") #
-    text = bytearray([byte_decoder[c] for c in word if c in byte_decoder])
+    # for key in encoder:
+    #     #text = bytearray([byte_decoder[c] for c in key])
+    #     text = key.encode("utf8")
+    #     fout.write(struct.pack("i", len(text)))
+    #     fout.write(text)
 
-    if(len(text)) < 1:
-        #print(f"'{word}'")
-        #continue
-        text = bytearray(word.encode('utf8'))
-    # else:
-    #     print(text)
-    fout.write(struct.pack("i", len(text)))
-    fout.write(text)
+    # for key in encoder_added:
+    #     try:
+    #         #text = bytearray([byte_decoder[c] for c in key])
+    #         text = key.encode("utf8")
+    #     except Exception as e:
+    #             print(e)
+    #             print(key)
+    #             print(text)
+    #             sys.exit(1)
+    #     fout.write(struct.pack("i", len(text)))
+    #     fout.write(text)
 
-# for key in encoder:
-#     #text = bytearray([byte_decoder[c] for c in key])
-#     text = key.encode("utf8")
-#     fout.write(struct.pack("i", len(text)))
-#     fout.write(text)
+    empty_vocab = hparams['vocab_size'] - tokenizer.vocab_size
 
-# for key in encoder_added:
-#     try:
-#         #text = bytearray([byte_decoder[c] for c in key])
-#         text = key.encode("utf8")
-#     except Exception as e:
-#             print(e)
-#             print(key)
-#             print(text)
-#             sys.exit(1)
-#     fout.write(struct.pack("i", len(text)))
-#     fout.write(text)
+    print(f"Fill empty vocab for {empty_vocab} slots")
 
-empty_vocab = hparams['vocab_size'] - tokenizer.vocab_size
+    for _ in range( hparams['vocab_size'] - len(encoder) - len(encoder_added)):
+        text = "<|endoftext|>".encode("utf8")
+        fout.write(struct.pack("i", len(text)))
+        fout.write(text)
 
-print(f"Fill empty vocab for {empty_vocab} slots")
+    for name in list_vars.keys():
+        data = list_vars[name].squeeze().numpy()
+        print(f"Processing variable: {name} with shape: ", data.shape)
 
-for i in range( hparams['vocab_size'] - len(encoder) - len(encoder_added)):
-    text = "<|endoftext|>".encode("utf8")
-    fout.write(struct.pack("i", len(text)))
-    fout.write(text)
+            # we don't need these
+        if name.endswith("attn.masked_bias") or name.endswith(".attn.bias"):
+            print(f"  Skipping variable: {name}")
+            continue
 
-for name in list_vars.keys():
-    data = list_vars[name].squeeze().numpy()
-    print("Processing variable: " + name + " with shape: ", data.shape)
+        n_dims = len(data.shape);
 
-    # we don't need these
-    if name.endswith("attn.masked_bias") or name.endswith(".attn.bias"):
-        print("  Skipping variable: " + name)
-        continue
+        # ftype == 0 -> float32, ftype == 1 -> float16
+        ftype_cur = 0;
+        if ftype == 0:
+            if data.dtype != np.float32:
+                print("  Converting to float32")
+                data = data.astype(np.float32)
+                ftype_cur = 0
 
-    n_dims = len(data.shape);
-
-    # ftype == 0 -> float32, ftype == 1 -> float16
-    ftype_cur = 0;
-    if ftype != 0:
-        if name[-7:] == ".weight" and n_dims == 2:
+        elif name[-7:] == ".weight" and n_dims == 2:
             print("  Converting to float16")
             data = data.astype(np.float16)
             ftype_cur = 1
@@ -184,39 +186,31 @@ for name in list_vars.keys():
             print("  Converting to float32")
             data = data.astype(np.float32)
             ftype_cur = 0
-    else:
-        if data.dtype != np.float32:
-            print("  Converting to float32")
-            data = data.astype(np.float32)
-            ftype_cur = 0
+        # for efficiency - transpose these matrices:
+        # (note - with latest ggml this is no longer more efficient, so disabling it)
+        #  "transformer.h.*.mlp.fc_in.weight"
+        #  "transformer.h.*.attn.out_proj.weight"
+        #  "transformer.h.*.attn.q_proj.weight"
+        #  "transformer.h.*.attn.k_proj.weight"
+        #  "transformer.h.*.attn.v_proj.weight"
+        #if name.endswith(".mlp.fc_in.weight")     or \
+        #   name.endswith(".attn.out_proj.weight") or \
+        #   name.endswith(".attn.q_proj.weight")   or \
+        #   name.endswith(".attn.k_proj.weight")   or \
+        #   name.endswith(".attn.v_proj.weight"):
+        #    print("  Transposing")
+        #    data = data.transpose()
 
-    # for efficiency - transpose these matrices:
-    # (note - with latest ggml this is no longer more efficient, so disabling it)
-    #  "transformer.h.*.mlp.fc_in.weight"
-    #  "transformer.h.*.attn.out_proj.weight"
-    #  "transformer.h.*.attn.q_proj.weight"
-    #  "transformer.h.*.attn.k_proj.weight"
-    #  "transformer.h.*.attn.v_proj.weight"
-    #if name.endswith(".mlp.fc_in.weight")     or \
-    #   name.endswith(".attn.out_proj.weight") or \
-    #   name.endswith(".attn.q_proj.weight")   or \
-    #   name.endswith(".attn.k_proj.weight")   or \
-    #   name.endswith(".attn.v_proj.weight"):
-    #    print("  Transposing")
-    #    data = data.transpose()
+        # header
+        str = name.encode('utf-8')
 
-    # header
-    str = name.encode('utf-8')
+        fout.write(struct.pack("iii", n_dims, len(str), ftype_cur))
+        for i in range(n_dims):
+            fout.write(struct.pack("i", data.shape[n_dims - 1 - i]))
+        fout.write(str);
 
-    fout.write(struct.pack("iii", n_dims, len(str), ftype_cur))
-    for i in range(n_dims):
-        fout.write(struct.pack("i", data.shape[n_dims - 1 - i]))
-    fout.write(str);
+        # data
+        data.tofile(fout)
 
-    # data
-    data.tofile(fout)
-
-fout.close()
-
-print("Done. Output file: " + fname_out)
+print(f"Done. Output file: {fname_out}")
 print("")
